@@ -1,0 +1,307 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Auth (Better Auth) ----------
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions Session[]
+  accounts Account[]
+
+  /// Families this user created or was invited into (via FamilyMember).
+  memberships    FamilyMember[]
+  /// Invites sent BY this user (to join a family).
+  invitesSent    FamilyInvite[]    @relation("InviteSender")
+  /// Occasions created by this user.
+  occasions      Occasion[]
+  /// Gifts marked as purchased by this user (surprise tracking).
+  purchases      Gift[]            @relation("GiftPurchaser")
+  /// Profile: the user's own person entity (for AI gift ideas for THEM).
+  myPerson       Person?           @relation("UserPerson")
+  /// Secret Santa assignments where this user is the giver.
+  santaGiving    SantaAssignment[] @relation("SantaGiver")
+  /// Secret Santa assignments where this user is the receiver.
+  santaReceiving SantaAssignment[] @relation("SantaReceiver")
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId    String
+  providerId   String
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  password     String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ---------- KinList domain ----------
+
+/// A family / group space. People and occasions live inside a family.
+
+model Family {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members     FamilyMember[]
+  invites     FamilyInvite[]
+  people      Person[]
+  occasions   Occasion[]
+  santaEvents SantaEvent[]
+}
+
+enum FamilyRole {
+  OWNER
+  MEMBER
+}
+
+model FamilyMember {
+  id       String     @id @default(cuid())
+  familyId String
+  family   Family     @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     FamilyRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  @@unique([familyId, userId])
+}
+
+model FamilyInvite {
+  id         String   @id @default(cuid())
+  familyId   String
+  family     Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  email      String
+  token      String   @unique @default(cuid())
+  /// Who sent the invite (for "X invited you" messages).
+  senderId   String
+  sender     User     @relation("InviteSender", fields: [senderId], references: [id], onDelete: Cascade)
+  /// Set when a registered user accepts by email match.
+  acceptedBy String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([email])
+}
+
+/// A person we buy gifts for. Can be linked to a real User (the "self" entity)
+/// so that others' AI suggestions for them can respect "the user's" own profile.
+
+model Person {
+  id           String    @id @default(cuid())
+  familyId     String
+  family       Family    @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  name         String
+  /// Relationship to the family, e.g. "Mom", "Uncle Bob", "Teammate".
+  relation     String?
+  birthday     DateTime?
+  /// Free-text notes: hobbies, favourite brands, sizes...
+  notes        String?
+  /// LIKES: things they enjoy (used by the AI suggester).
+  likes        String[]  @default([])
+  /// DISLIKES: things to avoid (used by the AI suggester).
+  dislikes     String[]  @default([])
+  /// Optional photo of the person.
+  photoUrl     String?
+  /// If this profile represents a real app user, link them here.
+  linkedUserId String?   @unique
+  linkedUser   User?     @relation("UserPerson", fields: [linkedUserId], references: [id], onDelete: SetNull)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  gifts         Gift[]
+  occasionLinks PersonOccasion[]
+}
+
+/// An occasion within a family: "Christmas 2026", "Mom's Birthday 2026".
+
+model Occasion {
+  id          String    @id @default(cuid())
+  familyId    String
+  family      Family    @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  name        String
+  date        DateTime?
+  /// Per-occasion budget cap for the whole family (optional).
+  budget      Decimal?  @db.Decimal(10, 2)
+  createdById String
+  createdBy   User      @relation(fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  people PersonOccasion[]
+  gifts  Gift[]
+}
+
+/// Join table: which people are relevant to which occasion,
+/// with an optional per-person budget.
+
+model PersonOccasion {
+  id         String   @id @default(cuid())
+  occasionId String
+  occasion   Occasion @relation(fields: [occasionId], references: [id], onDelete: Cascade)
+  personId   String
+  person     Person   @relation(fields: [personId], references: [id], onDelete: Cascade)
+  /// Budget for THIS person for THIS occasion.
+  budget     Decimal? @db.Decimal(10, 2)
+
+  @@unique([occasionId, personId])
+}
+
+/// A gift: an idea, or a planned/purchased item for a person at an occasion.
+
+model Gift {
+  id         String    @id @default(cuid())
+  personId   String
+  person     Person    @relation(fields: [personId], references: [id], onDelete: Cascade)
+  occasionId String?
+  occasion   Occasion? @relation(fields: [occasionId], references: [id], onDelete: SetNull)
+
+  title       String
+  description String?
+  /// Where to buy it.
+  url         String?
+  /// Photo of the gift idea.
+  imageUrl    String?
+  /// Estimated / listed price.
+  price       Decimal?   @db.Decimal(10, 2)
+  currency    String     @default("USD")
+  /// Idea source: MANUAL, AI, or IMPORTED (wishlist URL).
+  source      GiftSource @default(MANUAL)
+
+  /// PURCHASE / SURPRISE STATE
+  /// NULL = just an idea (nobody claimed it).
+  /// Some("claimed") = someone is buying it (hidden from the recipient).
+  /// Some("purchased") = bought, still hidden from the recipient.
+  status      PurchaseStatus @default(IDEA)
+  /// Who claimed/purchased it (hidden from the gift recipient).
+  purchaserId String?
+  purchaser   User?          @relation("GiftPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+  purchasedAt DateTime?
+
+  /// Gift history: gifts this person received in past occasions.
+  /// (kept simple: a gift row tied to a past-dated occasion = history)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([personId])
+  @@index([occasionId])
+}
+
+enum GiftSource {
+  MANUAL
+  AI
+  IMPORT
+}
+
+enum PurchaseStatus {
+  /// Just an idea, not claimed by anyone.
+  IDEA
+  /// Someone said "I'll get this" (hidden from recipient).
+  CLAIMED
+  /// Someone bought it (hidden from recipient).
+  PURCHASED
+}
+
+// ---------- Secret Santa ----------
+
+model SantaEvent {
+  id          String    @id @default(cuid())
+  familyId    String
+  family      Family    @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  name        String    @default("Secret Santa")
+  /// Budget cap for the exchange.
+  budget      Decimal?  @db.Decimal(10, 2)
+  /// When the draw happened.
+  drawnAt     DateTime?
+  createdById String
+  createdAt   DateTime  @default(now())
+
+  assignments  SantaAssignment[]
+  participants SantaParticipant[]
+}
+
+model SantaParticipant {
+  id      String     @id @default(cuid())
+  eventId String
+  event   SantaEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId  String
+
+  @@unique([eventId, userId])
+}
+
+/// The assignment: giver -> receiver. Only the GIVER can see whom they give to.
+/// The receiver never sees who gives to them (until revealed).
+
+model SantaAssignment {
+  id         String     @id @default(cuid())
+  eventId    String
+  event      SantaEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  giverId    String
+  giver      User       @relation("SantaGiver", fields: [giverId], references: [id], onDelete: Cascade)
+  receiverId String
+  receiver   User       @relation("SantaReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  /// Optional wishlist text attached by the receiver.
+  wishlist   String?
+
+  @@unique([eventId, giverId])
+  @@unique([eventId, receiverId])
+}

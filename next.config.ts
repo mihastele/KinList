@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  cacheComponents: true,
-  partialPrefetching: true,
+  // cacheComponents (React "use cache") is incompatible with `export const dynamic`.
+  // KinList reads the DB on every request for personalized pages, so we disable it.
   turbopack: {
     rules: {
       "*.css": {
